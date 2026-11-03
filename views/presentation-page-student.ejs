@@ -447,7 +447,7 @@ padding: 1rem;
         <% var i=1;%>
         <%data.pptimages.forEach(function(image){%>
           <div class="column">
-            <img class="demo cursor" src="/<%=image%>" style="width:100%" onclick="currentSlide(`<%=i%>`)" alt="Small Image">
+            <img class="demo cursor" src="/<%=image%>" style="width:100%" onclick="currentSlide(<%=i%>)" alt="Small Image">
           <%++i%>
           </div>
         <%});%>
@@ -491,130 +491,7 @@ padding: 1rem;
 </div>
 
 <script src="/socket.io/socket.io.js"></script>
-
-<script>
-  const room = document.getElementById("session_id").innerText;
-  const socket=io();
-  socket.on('changeslide',n =>{
-    currentSlide(n);
-  })
-  var slideIndex = 1;
-  showSlides(slideIndex);
-  function plusSlides(n) {
-    showSlides(slideIndex += n);
-  }
-  function currentSlide(n) {
-    showSlides(slideIndex = n);
-  }
-  function showSlides(n) {
-    var i;
-    var slides = document.getElementsByClassName("mySlides");
-    var dots = document.getElementsByClassName("demo");
-    var captionText = document.getElementById("caption");
-    if (n > slides.length) {slideIndex = 1}
-    if (n < 1) {slideIndex = slides.length}
-    for (i = 0; i < slides.length; i++) {
-        slides[i].style.display = "none";
-    }
-    for (i = 0; i < dots.length; i++) {
-        dots[i].className = dots[i].className.replace(" active", "");
-    }
-    slides[slideIndex-1].style.display = "block";
-    dots[slideIndex-1].className += " active";
-    captionText.innerHTML = dots[slideIndex-1].alt;
-  }
-  
-  function openForm() {
-    document.getElementById("myForm").style.display = "block";
-  }
-  
-  function closeForm() {
-    document.getElementById("myForm").style.display = "none";
-  }
- 
-      var  username = document.getElementById('username').innerText;
-      var user;
-      var formstudent = document.getElementById('nameform');
-
-      // Adds a listener for the "submit" event.
-        formstudent.addEventListener('submit', function(e) {
-
-         e.preventDefault();
-         Userfn();
-
-          });
-
-      function Userfn(){
-        username = document.getElementById('username').value;
-
-        if(username==""){
-          username="ghost";
-        }
-        user= username;
-        console.log(user);
-        socket.emit("joinRoom",{username,room});
-        document.getElementById("screen1").style.display = "none";
-        document.getElementById("slideDisp").style.display = "block";
-
-
-      }
-
-    socket.on('newUser',newuser =>{
-      openForm();
-      // document.getElementById("txtmsg").insertAdjacentHTML("afterend",'<h3 style="color : green">'+newuser+'</h3>'+ 'Joined');
-    const div = document.createElement('div');
-    div.classList.add('messages');
-    div.innerHTML = `  <p class="lead" ><span style="color : green">${newuser} </span >joined </p>`;
-    document.querySelector('#txtmsg').appendChild(div);
-    })
-
-    socket.on('userList',userList =>{
-      // console.log(userList);
-    })
-
-    socket.on('deadUser',newuser =>{
-      openForm();
-      // console.log("disconnected",newuser);
-      const div = document.createElement('div');
-      div.classList.add('messages');
-      div.innerHTML = `  <p class="lead" ><span style="color : red">${newuser} </span >Disconnected </p>`;
-      document.querySelector('#txtmsg').appendChild(div);
-    })
-
-  const chatForm = document.getElementById("chatForm");
-  const chatMessages = document.getElementById("txtmsg") ;
-  chatForm.addEventListener('submit', (e) =>{
-    e.preventDefault();
-
-    const msg = e.target.elements.message.value;
-    socket.emit('chatMessage', msg);
-    e.target.elements.message.value="";
-    e.target.elements.message.focus();
-});
-
-socket.on('message', message =>{
-    outputMessage(message);
-    chatMessages.scrollTop = chatMessages.scrollHeight;
-});
-
-function outputMessage(message){
-  console.log("working");
-    const div = document.createElement('div');
-    div.classList.add('messages');
-    div.innerHTML = `  <p class="lead"><span style="color:cornflowerblue;">${message.username} </span><span style="font-size: 0.5rem;">${message.time}</span>:${message.text} </p>`;
-    document.querySelector('#txtmsg').appendChild(div);
-}
-</script>
-<script>
-  document.onkeydown = function (e) {
-  switch (e.key) {
-      case 'ArrowLeft':
-        plusSlides(-1)
-          break;
-      case 'ArrowRight':
-         plusSlides(1);
-  }
-};
-</script>
+<script src="/assets/classroom.js"></script>
+<script>ClassroomUI.start({ teacher: false });</script>
 </body>
 </html>

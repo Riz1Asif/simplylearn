@@ -41,16 +41,17 @@ body::-webkit-scrollbar-thumb {
 
 <div style="margin: 65px 200px;">
   <form action="/teacher" method="post" enctype="multipart/form-data">
+    <p>Teacher controls are available in the browser you use to create the classroom.</p>
     <label for="fname">First Name</label>
-    <input type="text" id="fname" name="name" placeholder="Your name.." required>
+    <input type="text" id="fname" name="name" placeholder="Your name.." maxlength="100" required>
 
     <label for="cname">Class Name</label>
-    <input type="text" id="cname" name="classname" placeholder="Your class name.." required>
+    <input type="text" id="cname" name="classname" placeholder="Your class name.." maxlength="200" required>
 
     <label for="image">Image Upload</label>
     <br>
     
-    <input type="file" id="myFile" name="pptimages" multiple required> <i style="font-size: 1rem;" multiple>A maximum of 40 images or a folder containing 40 files are to be added</i>
+    <input type="file" id="myFile" name="pptimages" accept="image/png,image/jpeg" multiple required> <i style="font-size: 1rem;">Up to 40 PNG/JPEG slides, at most 5 MiB each</i>
      
       
     <input type="submit" value="Submit">

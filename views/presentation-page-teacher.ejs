@@ -702,7 +702,7 @@ img {
       <% var i=1;%>
       <%data.pptimages.forEach(function(image){%>
         <div class="column">
-          <img class="demo cursor" src="/<%=image%>" style="width:100%" onclick="currentSlide(`<%=i%>`)" alt="Small Image">
+          <img class="demo cursor" src="/<%=image%>" style="width:100%" onclick="currentSlide(<%=i%>)" alt="Small Image">
         <%++i%>
         </div>
       <%});%>
@@ -750,132 +750,7 @@ img {
 </div>
 
 <script src="/socket.io/socket.io.js"></script>
-
-<script>
-const room = document.getElementById("session_id").innerText;
-var  username = document.getElementById('username').innerText;
-
-
-const socket=io();
-
-socket.emit("joinRoom",{username,room});
-
-var slideIndex = 1;
-showSlides(slideIndex);
-
-function plusSlides(n) {
-  showSlides(slideIndex += n);
-}
-
-function currentSlide(n) {
-  showSlides(slideIndex = n);
-}
-
-function showSlides(n) {
-  var i;
-  var slides = document.getElementsByClassName("mySlides");
-  var dots = document.getElementsByClassName("demo");
-  var captionText = document.getElementById("caption");
-  if (n > slides.length) {slideIndex = 1}
-  if (n < 1) {slideIndex = slides.length}
-  for (i = 0; i < slides.length; i++) {
-      slides[i].style.display = "none";
-  }
-  for (i = 0; i < dots.length; i++) {
-      dots[i].className = dots[i].className.replace(" active", "");
-  }
-  slides[slideIndex-1].style.display = "block";
-  dots[slideIndex-1].className += " active";
-  captionText.innerHTML = dots[slideIndex-1].alt;
-
-  socket.emit("currentslide",n);
-}
-
-  function openForm() {
-    document.getElementById("myForm").style.display = "block";
-    document.getElementById("chat-color").style.backgroundColor = "#555" ;
-  }
-  
-  function closeForm() {
-    document.getElementById("myForm").style.display = "none";
-  }
-  
-    socket.on('newUser',newuser =>{
-      // openForm();
-      // document.getElementById("txtmsg").insertAdjacentHTML("afterend",'<h3 style="color : green">'+newuser+'</h3>'+ 'Joined');
-    const div = document.createElement('div');
-    div.classList.add('messages');
-    div.innerHTML = `  <p class="lead" ><span style="color : green">${newuser} </span >joined </p>`;
-    document.querySelector('#txtmsg').appendChild(div);
-    
-    document.getElementById("chat-color").style.backgroundColor = "#349bd9";
-    })
-
-    socket.on('userList',userList =>{
-      var div = document.getElementById("list");
-      div.innerHTML="";
-      if(userList){
-        // openForm();
-        var i = 0;
-      userList.forEach(function(user){
-        i++;
-        let li = document.createElement("li");
-        li.classList.add('nav-item');
-        li.innerHTML = ` <a href="#" class="nav-link"><span class="link-text">(${i})  ${user.username}</span></a>`
-        console.log(userList.username);
-        // document.getElementById("list").insertAdjacentHTML("afterend",'<li class="nav-item"><a href="#" class="nav-link"><span class="link-text">'+user.username+'</span></a></li>');
-        document.querySelector('#list').appendChild(li);
-
-      })
-      }
-    });
-
-    socket.on('deadUser',newuser =>{
-      // openForm();
-      // console.log("disconnected",newuser);
-      const div = document.createElement('div');
-      div.classList.add('messages');
-      div.innerHTML = `  <p class="lead" ><span style="color : red">${newuser} </span >Disconnected </p>`;
-      document.querySelector('#txtmsg').appendChild(div);
-    })
-
-    const chatForm = document.getElementById("chatForm");
-    const chatMessages = document.getElementById("txtmsg") ;
-
-    chatForm.addEventListener('submit', (e) =>{
-      e.preventDefault();
-  
-      const msg = e.target.elements.message.value;
-      console.log(msg);
-      socket.emit('chatMessage', msg);
-      e.target.elements.message.value="";
-      e.target.elements.message.focus();
-  });
-
-  socket.on('message', message =>{
-    outputMessage(message);
-    chatMessages.scrollTop = chatMessages.scrollHeight;
-});
-
-function outputMessage(message){
-  console.log("working");
-    const div = document.createElement('div');
-    div.classList.add('messages');
-    div.innerHTML = `  <p class="lead"><span style="color:cornflowerblue;">${message.username} </span><span style="font-size: 0.5rem;">${message.time}</span>:${message.text} </p>`;
-    document.querySelector('#txtmsg').appendChild(div);
-}
-  </script>
-  <script>
-    document.onkeydown = function (e) {
-    switch (e.key) {
-        case 'ArrowLeft':
-          plusSlides(-1)
-            break;
-        case 'ArrowRight':
-           plusSlides(1);
-    }
-};
-  </script>
-
+<script src="/assets/classroom.js"></script>
+<script>ClassroomUI.start({ teacher: true });</script>
 </body>
 </html>
