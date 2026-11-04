@@ -11,11 +11,16 @@ const fs = require('fs-extra');
 const formatMessage = require('./utils/messages');
 const { userJoin, getCurrentUser, userLeave, getRoom } = require('./utils/users');
 const Teacher = require('./models/teacher');
+const { ConversionQueue } = require('./services/conversion-queue');
+const { ConversionError, MAX_DOCUMENT_BYTES, validateSource } = require('./services/presentations');
 
 const app = express();
 const http = createServer(app);
 const io = new Server(http);
-const uploadRoot = path.join(__dirname, 'uploads');
+const dataRoot = path.resolve(process.env.DATA_DIR || __dirname);
+const uploadRoot = path.join(dataRoot, 'uploads');
+const workRoot = path.join(dataRoot, '.conversion-jobs');
+const conversions = new ConversionQueue({ uploadRoot, workRoot });
 const hashToken = token => createHash('sha256').update(token).digest('hex');
 const cookieName = id => 'teacher_' + id;
 const roomActions = new Map();
@@ -41,6 +46,18 @@ function isOwner(cookies, classroom) {
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
+function grantTeacher(req, res, id, token) {
+  res.cookie(cookieName(id), token, {
+    httpOnly: true, sameSite: 'strict', secure: req.secure, path: '/',
+    maxAge: 30 * 24 * 60 * 60 * 1000
+  });
+}
+
+function validTeacherFields(body) {
+  return typeof body?.name === 'string' && body.name.trim() && body.name.length <= 100 &&
+    typeof body?.classname === 'string' && body.classname.trim() && body.classname.length <= 200;
+}
+
 const storage = multer.diskStorage({
   destination(req, file, cb) {
     const directory = path.join(uploadRoot, req.classroomId);
@@ -61,6 +78,29 @@ const uploads = multer({
     cb(null, true);
   }
 }).array('pptimages', 40);
+
+const presentationUploads = multer({
+  storage: multer.diskStorage({
+    destination(req, file, cb) {
+      const directory = path.join(workRoot, req.classroomId);
+      fs.ensureDir(directory).then(() => cb(null, directory), cb);
+    },
+    filename(req, file, cb) { cb(null, 'source.' + req.sourceType); }
+  }),
+  limits: { fieldSize: 1024, fields: 2, fileSize: MAX_DOCUMENT_BYTES, files: 1 },
+  fileFilter(req, file, cb) {
+    const extension = path.extname(file.originalname).toLowerCase();
+    const types = {
+      '.pptx': ['application/vnd.openxmlformats-officedocument.presentationml.presentation', 'application/zip', 'application/octet-stream'],
+      '.pdf': ['application/pdf', 'application/octet-stream']
+    };
+    if (!types[extension]?.includes(file.mimetype)) {
+      return cb(Object.assign(new Error('Choose one PPTX or PDF file.'), { status: 400 }));
+    }
+    req.sourceType = extension.slice(1);
+    cb(null, true);
+  }
+}).array('pptimages', 1);
 
 async function validImage(file) {
   const handle = await open(file.path, 'r');
@@ -96,9 +136,7 @@ app.post('/teacher', (req, res) => {
       if (uploadError) throw uploadError;
       const name = req.body?.name;
       const classname = req.body?.classname;
-      if (typeof name !== 'string' || !name.trim() || name.length > 100 ||
-          typeof classname !== 'string' || !classname.trim() || classname.length > 200 ||
-          !req.files?.length) {
+      if (!validTeacherFields(req.body) || !req.files?.length) {
         throw Object.assign(new Error('A teacher name, class name and at least one slide are required.'), { status: 400 });
       }
       for (const file of req.files) {
@@ -115,16 +153,38 @@ app.post('/teacher', (req, res) => {
         currentSlide: 1,
         pptimages: req.files.map(file => path.posix.join('uploads', req.classroomId, file.filename))
       });
-      res.cookie(cookieName(saved._id), token, {
-        httpOnly: true, sameSite: 'strict', secure: req.secure, path: '/',
-        maxAge: 30 * 24 * 60 * 60 * 1000
-      });
+      grantTeacher(req, res, saved._id, token);
       res.redirect('/teacher/' + saved._id);
     } catch (error) {
       await fs.remove(path.join(uploadRoot, req.classroomId)).catch(cleanupError => console.error(cleanupError));
       const status = error instanceof multer.MulterError ? 400 : error.status || 500;
       if (status === 500) console.error(error);
       res.status(status).send(status === 500 ? 'Unable to create the classroom.' : error.message);
+    }
+  });
+});
+
+app.post('/teacher/presentation', (req, res) => {
+  req.classroomId = new mongoose.Types.ObjectId().toString();
+  presentationUploads(req, res, async uploadError => {
+    try {
+      if (uploadError) throw uploadError;
+      if (!validTeacherFields(req.body) || req.files?.length !== 1) {
+        throw Object.assign(new Error('Enter a teacher name and class name, and choose one PPTX or PDF.'), { status: 400 });
+      }
+      await validateSource(req.files[0].path, req.sourceType);
+      const token = randomBytes(32).toString('hex');
+      await Teacher.create({ _id: req.classroomId, name: req.body.name.trim(),
+        classname: req.body.classname.trim(), ownerTokenHash: hashToken(token),
+        sourceType: req.sourceType, status: 'queued', pptimages: [] });
+      grantTeacher(req, res, req.classroomId, token);
+      conversions.enqueue(req.classroomId);
+      res.redirect('/teacher/' + req.classroomId);
+    } catch (error) {
+      await fs.remove(path.join(workRoot, req.classroomId)).catch(() => {});
+      const status = error instanceof multer.MulterError || error instanceof ConversionError ? 400 : error.status || 500;
+      if (status === 500) console.error('Unable to queue presentation:', error.name);
+      res.status(status).send(status === 500 ? 'Unable to upload the presentation.' : error.message);
     }
   });
 });
@@ -149,8 +209,20 @@ function requireTeacher(req, res, next) {
   next();
 }
 
-const renderClassroom = view => (req, res) => res.render(view, { data: req.classroom });
+const renderClassroom = view => (req, res) => {
+  if (req.classroom.status !== 'ready') {
+    if (view === 'linkshare') return res.render('processing', { data: req.classroom });
+    if (view === 'presentation-page-student') return res.status(409).send('This classroom is not ready yet. Please ask the teacher to share the link after conversion.');
+    return res.redirect('/teacher/' + req.params.id);
+  }
+  res.render(view, { data: req.classroom });
+};
 app.get('/teacher/:id', loadClassroom, requireTeacher, renderClassroom('linkshare'));
+app.get('/teacher/:id/status', loadClassroom, requireTeacher, (req, res) => {
+  const data = req.classroom;
+  res.json({ status: data.status, error: data.conversionError,
+    convertedSlides: data.convertedSlides, totalSlides: data.totalSlides });
+});
 app.get('/session/:id/teacher', loadClassroom, requireTeacher, renderClassroom('presentation-page-teacher'));
 app.get('/session/:id/recordteacher', loadClassroom, requireTeacher, renderClassroom('working-on-this'));
 app.get('/session/:id', loadClassroom, renderClassroom('presentation-page-student'));
@@ -159,12 +231,14 @@ app.post('/session/:id/teacher', loadClassroom, requireTeacher, async (req, res,
   try {
     const id = req.classroom._id.toString();
     await inRoom(id, async () => {
+      await conversions.cancel(id);
       await Teacher.deleteOne({ _id: id });
       io.to(id).emit('sessionEnded');
       for (const user of getRoom(id)) userLeave(user.id);
       io.in(id).socketsLeave(id);
       // Never derive deletion paths from the display name, including legacy records.
       await fs.remove(path.join(uploadRoot, id));
+      await fs.remove(path.join(workRoot, id));
     });
     res.clearCookie(cookieName(id), { path: '/' });
     res.redirect('/');
@@ -193,6 +267,7 @@ io.on('connection', socket => {
       return inRoom(payload.room, async () => {
         const classroom = await Teacher.findById(payload.room).select('+ownerTokenHash');
         if (!classroom) return reply(ack, { ok: false, error: 'This classroom no longer exists.' });
+        if (classroom.status !== 'ready') return reply(ack, { ok: false, error: 'This classroom is not ready yet.' });
         if (!socket.connected) return;
         const previous = getCurrentUser(socket.id);
         const sameRoom = previous?.room === payload.room;
@@ -229,7 +304,7 @@ io.on('connection', socket => {
       }
       await inRoom(user.room, async () => {
         const classroom = await Teacher.findById(user.room).select('+ownerTokenHash');
-        if (!classroom || !isOwner(socket.request.headers.cookie, classroom) ||
+        if (!classroom || classroom.status !== 'ready' || !isOwner(socket.request.headers.cookie, classroom) ||
             n > classroom.pptimages.length || getCurrentUser(socket.id) !== user) {
           return reply(ack, { ok: false, error: 'Invalid classroom or slide number.' });
         }
@@ -258,6 +333,7 @@ io.on('connection', socket => {
 async function start(port = process.env.PORT || 1690) {
   const uri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/simplylearn';
   await mongoose.connect(uri);
+  await conversions.resume();
   return new Promise((resolve, reject) => {
     http.once('error', reject);
     http.listen(port, () => {
@@ -268,12 +344,26 @@ async function start(port = process.env.PORT || 1690) {
   });
 }
 
+async function stop() {
+  await new Promise(resolve => io.close(resolve));
+  await conversions.stop();
+  await mongoose.disconnect();
+}
+
 if (require.main === module) {
-  start().catch(() => {
+  let stopping = false;
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    process.once(signal, () => {
+      if (stopping) return;
+      stopping = true;
+      stop().catch(() => { process.exitCode = 1; });
+    });
+  }
+  start().catch(async () => {
     console.error('Unable to start the server. Check MongoDB connectivity and PORT.');
-    io.close();
-    mongoose.disconnect().finally(() => { process.exitCode = 1; });
+    await stop();
+    process.exitCode = 1;
   });
 }
 
-module.exports = { app, http, io, start };
+module.exports = { app, http, io, start, stop, conversions };

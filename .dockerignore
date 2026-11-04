@@ -1,0 +1,8 @@
+.git
+node_modules
+uploads
+.conversion-jobs
+data
+.env
+.env.*
+*.log

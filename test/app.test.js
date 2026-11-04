@@ -8,7 +8,9 @@ const { JSDOM } = require('jsdom');
 
 process.env.MONGODB_URI = process.env.TEST_MONGODB_URI ||
   'mongodb://127.0.0.1:27017/simplylearn_test';
-const { start, io } = require('../index');
+const { start, io, conversions } = require('../index');
+const { makePptx, makePdf } = require('../test-support/presentations.cjs');
+const { ConversionQueue } = require('../services/conversion-queue');
 const Teacher = require('../models/teacher');
 const { getRoom } = require('../utils/users');
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aL1sAAAAASUVORK5CYII=', 'base64');
@@ -50,6 +52,32 @@ describe('classroom HTTP, realtime and browser regressions', { timeout: 60000 },
     const classroom = { id, cookie, directory: path.join(root, 'uploads', id) };
     classrooms.push(classroom);
     return classroom;
+  }
+  async function uploadPresentation(bytes, extension = 'pdf') {
+    const form = new FormData();
+    form.append('name', 'Presentation teacher');
+    form.append('classname', 'Automatic conversion');
+    form.append('pptimages', new Blob([bytes], { type: extension === 'pdf' ? 'application/pdf' :
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation' }), 'deck.' + extension);
+    const response = await request('/teacher/presentation', { method: 'POST', body: form, redirect: 'manual' });
+    assert.equal(response.status, 302, await response.text());
+    const id = response.headers.get('location').split('/').pop();
+    const cookie = response.headers.getSetCookie()[0].split(';')[0];
+    const item = { id, cookie, directory: path.join(root, 'uploads', id) };
+    classrooms.push(item);
+    return item;
+  }
+  async function converted(item, expected = 'ready') {
+    const deadline = Date.now() + 30000;
+    for (;;) {
+      const response = await request('/teacher/' + item.id + '/status', { headers: { Cookie: item.cookie } });
+      assert.equal(response.status, 200);
+      const data = await response.json();
+      if (data.status === expected) return data;
+      if (data.status === 'failed') assert.fail(data.error);
+      if (Date.now() > deadline) assert.fail('Timed out waiting for conversion');
+      await new Promise(resolve => setTimeout(resolve, 30));
+    }
   }
   function event(socket, name, predicate = () => true) {
     return new Promise((resolve, reject) => {
@@ -99,15 +127,18 @@ describe('classroom HTTP, realtime and browser regressions', { timeout: 60000 },
     main = await createClass();
   });
   afterEach(async () => {
+    await conversions.draining;
     for (const window of windows.splice(0)) window.close();
     for (const socket of sockets.splice(0)) socket.close();
     await waitUntil(() => classrooms.every(item => getRoom(item.id).length === 0));
   });
   after(async () => {
+    await conversions.stop();
     for (const socket of sockets) socket.close();
     for (const item of classrooms) {
       await Teacher.deleteOne({ _id: item.id });
       await fs.rm(item.directory, { recursive: true, force: true });
+      await fs.rm(path.join(root, '.conversion-jobs', item.id), { recursive: true, force: true });
     }
     await new Promise(resolve => io.close(resolve));
     await mongoose.disconnect();
@@ -286,6 +317,72 @@ describe('classroom HTTP, realtime and browser regressions', { timeout: 60000 },
     assert.equal(late.result.currentSlide, 2);
   });
 
+  it('lets students skim privately until the teacher next changes the shared slide', async () => {
+    const item = await createClass('Independent browsing', { count: 4 });
+    async function openPage(teacher, username) {
+      const url = '/session/' + item.id + (teacher ? '/teacher' : '');
+      const dom = await domFor(url, teacher ? item.cookie : undefined);
+      const socket = connectSocket(base, {
+        autoConnect: false, forceNew: true, transports: ['websocket'], reconnection: false,
+        extraHeaders: teacher ? { Cookie: item.cookie } : {}
+      });
+      sockets.push(socket);
+      dom.window.io = () => socket;
+      const ui = dom.window.ClassroomUI.start({ teacher });
+      if (!teacher) {
+        dom.window.document.getElementById('username').value = username;
+        dom.window.Userfn();
+      }
+      socket.connect();
+      await waitUntil(() => teacher
+        ? getRoom(item.id).some(user => user.id === socket.id)
+        : dom.window.document.getElementById('screen1').style.display === 'none');
+      return { window: dom.window, ...ui };
+    }
+    const teacher = await openPage(true);
+    const alice = await openPage(false, 'Alice');
+    const bob = await openPage(false, 'Bob');
+    await waitUntil(() => teacher.window.document.getElementById('list').textContent.includes('Bob'));
+
+    function visibleSlide(page) {
+      const slides = [...page.window.document.querySelectorAll('.mySlides')];
+      assert.equal(slides.filter(slide => slide.style.display === 'block').length, 1);
+      return slides.findIndex(slide => slide.style.display === 'block') + 1;
+    }
+    const views = () => [teacher, alice, bob].map(visibleSlide);
+    const teacherUpdates = [];
+    let studentBroadcasts = 0;
+    for (const student of [alice, bob]) {
+      student.socket.onAnyOutgoing(name => { if (name === 'currentslide') studentBroadcasts++; });
+    }
+    teacher.socket.on('changeslide', n => teacherUpdates.push(n));
+    assert.deepEqual(views(), [1, 1, 1]);
+
+    teacher.window.plusSlides(1);
+    await waitUntil(() => views().every(n => n === 2));
+    assert.deepEqual(views(), [2, 2, 2]);
+
+    alice.window.currentSlide(4);
+    bob.window.document.body.dispatchEvent(new bob.window.KeyboardEvent('keydown', {
+      key: 'ArrowLeft', bubbles: true
+    }));
+    assert.deepEqual(views(), [2, 4, 1]);
+    const chat = event(alice.socket, 'message', message => message.text === 'Still browsing');
+    await ack(bob.socket, 'chatMessage', 'Still browsing');
+    await chat;
+    assert.deepEqual(views(), [2, 4, 1]);
+    assert.equal((await Teacher.findById(item.id)).currentSlide, 2);
+    assert.equal(studentBroadcasts, 0);
+    assert.deepEqual(teacherUpdates, [2]);
+
+    teacher.window.plusSlides(1);
+    await waitUntil(() => views().every(n => n === 3));
+    assert.deepEqual(views(), [3, 3, 3]);
+    assert.equal((await Teacher.findById(item.id)).currentSlide, 3);
+    assert.equal(studentBroadcasts, 0);
+    assert.deepEqual(teacherUpdates, [2, 3]);
+  });
+
   it('orders rapid teacher changes and exposes the final slide to late joins', async () => {
     const owner = await join(main.cookie);
     await Promise.all([1, 2, 3].map(n => ack(owner.socket, 'currentslide', n)));
@@ -440,5 +537,177 @@ describe('classroom HTTP, realtime and browser regressions', { timeout: 60000 },
     await assert.rejects(fs.access(item.directory), { code: 'ENOENT' });
     assert.equal((await ack(viewer.socket, 'chatMessage', 'After termination')).ok, false);
     assert.ok(await Teacher.findById(main.id));
+  });
+
+  it('converts a PDF upload to ordered private-source classroom slides', async () => {
+    const item = await uploadPresentation(makePdf(12));
+    const state = await converted(item);
+    assert.equal(state.totalSlides, 12);
+    const data = await Teacher.findById(item.id);
+    assert.equal(data.pptimages.length, 12);
+    assert.ok(data.pptimages[9].endsWith('/slide-010.jpg'));
+    assert.equal(data.sourceType, 'pdf');
+    const image = await request('/' + data.pptimages[0]);
+    assert.equal(image.status, 200);
+    assert.equal(image.headers.get('content-type'), 'image/jpeg');
+    for (const privatePath of ['/uploads/' + item.id + '/source.pdf', '/.conversion-jobs/' + item.id + '/source.pdf']) {
+      assert.equal((await request(privatePath)).status, 404);
+    }
+    await conversions.draining;
+    await assert.rejects(fs.access(path.join(root, '.conversion-jobs', item.id)), { code: 'ENOENT' });
+    const owner = await join(item.cookie, item.id);
+    assert.equal((await ack(owner.socket, 'currentslide', 12)).ok, true);
+    assert.equal((await join(undefined, item.id)).result.currentSlide, 12);
+  });
+
+  it('converts a PPTX upload and excludes hidden slides and notes pages', async () => {
+    const item = await uploadPresentation(await makePptx(4, { hidden: 1, notes: true }), 'pptx');
+    await converted(item);
+    const data = await Teacher.findById(item.id);
+    assert.equal(data.pptimages.length, 3);
+    assert.equal(data.sourceType, 'pptx');
+    const ownerPage = await request('/teacher/' + item.id, { headers: { Cookie: item.cookie } });
+    assert.match(await ownerPage.text(), /Start Session/);
+  });
+
+  it('reports corrupt and over-limit document failures without publishing partial slides', async () => {
+    for (const [bytes, extension, expected] of [
+      [Buffer.from('PK\u0003\u0004broken archive'), 'pptx', /could not be read/],
+      [makePdf(41), 'pdf', /between 1 and 40/]
+    ]) {
+      const item = await uploadPresentation(bytes, extension);
+      const state = await converted(item, 'failed');
+      assert.match(state.error, expected);
+      assert.equal((await Teacher.findById(item.id)).pptimages.length, 0);
+      assert.equal((await request('/session/' + item.id)).status, 409);
+      await conversions.draining;
+      await assert.rejects(fs.access(item.directory), { code: 'ENOENT' });
+      await assert.rejects(fs.access(path.join(root, '.conversion-jobs', item.id)), { code: 'ENOENT' });
+    }
+  });
+
+  it('rejects invalid signatures, mixed document uploads and files larger than 25 MiB', async () => {
+    for (const files of [
+      [{ bytes: Buffer.from('not a PDF'), name: 'fake.pdf', type: 'application/pdf' }],
+      [{ bytes: Buffer.concat([Buffer.from('%PDF-'), Buffer.alloc(25 * 1024 * 1024)]), name: 'large.pdf', type: 'application/pdf' }],
+      [{ bytes: makePdf(), name: 'deck.pdf', type: 'application/pdf' }, { bytes: png, name: 'image.png', type: 'image/png' }]
+    ]) {
+      const form = new FormData();
+      form.append('name', 'Invalid presentation');
+      form.append('classname', 'Must not be saved');
+      for (const file of files) form.append('pptimages', new Blob([file.bytes], { type: file.type }), file.name);
+      assert.equal((await request('/teacher/presentation', { method: 'POST', body: form })).status, 400);
+    }
+    assert.equal(await Teacher.countDocuments({ name: 'Invalid presentation' }), 0);
+  });
+
+  it('keeps conversions private, queues one worker, and lets the owner cancel queued or active work', async () => {
+    const original = conversions.convert;
+    let release;
+    let activeSignal;
+    let calls = 0;
+    const gate = new Promise(resolve => { release = resolve; });
+    conversions.convert = async (source, kind, runtime, options) => {
+      calls++;
+      activeSignal = options.signal;
+      await new Promise((resolve, reject) => {
+        const abort = () => reject(options.signal.reason);
+        options.signal.addEventListener('abort', abort, { once: true });
+        gate.then(() => { options.signal.removeEventListener('abort', abort); resolve(); });
+      });
+      return original(source, kind, runtime, options);
+    };
+    let first;
+    let second;
+    try {
+      first = await uploadPresentation(makePdf());
+      await waitUntil(() => !!activeSignal);
+      second = await uploadPresentation(makePdf());
+      assert.equal((await Teacher.findById(second.id)).status, 'queued');
+      assert.equal(calls, 1);
+      assert.equal((await request('/teacher/' + first.id + '/status')).status, 403);
+      const page = await request('/teacher/' + first.id, { headers: { Cookie: first.cookie } });
+      assert.match(await page.text(), /Preparing your classroom/);
+      assert.equal((await request('/session/' + first.id)).status, 409);
+      const viewer = await connect();
+      assert.equal((await ack(viewer, 'joinRoom', { room: first.id, username: 'Too early' })).ok, false);
+      assert.equal((await request('/session/' + first.id + '/teacher', { method: 'POST' })).status, 403);
+      for (const item of [second, first]) {
+        const response = await request('/session/' + item.id + '/teacher', {
+          method: 'POST', headers: { Cookie: item.cookie }, redirect: 'manual'
+        });
+        assert.equal(response.status, 302);
+        assert.equal(await Teacher.findById(item.id), null);
+        await assert.rejects(fs.access(path.join(root, '.conversion-jobs', item.id)), { code: 'ENOENT' });
+      }
+      assert.equal(activeSignal.aborted, true);
+      assert.equal(calls, 1);
+    } finally {
+      release();
+      conversions.convert = original;
+      if (first) await conversions.cancel(first.id);
+      if (second) await conversions.cancel(second.id);
+    }
+  });
+
+  it('recovers an interrupted persisted conversion on startup', async () => {
+    const data = await Teacher.create({ name: 'Restart test', classname: 'Resume conversion',
+      status: 'processing', sourceType: 'pdf' });
+    const id = data._id.toString();
+    const temporary = await fs.mkdtemp('/tmp/simplylearn-recovery-test-');
+    const worker = new ConversionQueue({ uploadRoot: path.join(temporary, 'uploads'), workRoot: path.join(temporary, 'jobs') });
+    classrooms.push({ id, directory: path.join(temporary, 'uploads', id) });
+    try {
+      await fs.mkdir(path.join(temporary, 'jobs', id), { recursive: true });
+      await fs.writeFile(path.join(temporary, 'jobs', id, 'source.pdf'), makePdf(2));
+      await fs.mkdir(path.join(temporary, 'uploads', id), { recursive: true });
+      await fs.writeFile(path.join(temporary, 'uploads', id, 'stale.jpg'), 'interrupted publication');
+      await worker.resume();
+      await worker.draining;
+      const ready = await Teacher.findById(id);
+      assert.equal(ready.status, 'ready');
+      assert.equal(ready.pptimages.length, 2);
+      await fs.access(path.join(temporary, 'uploads', id, 'slide-002.jpg'));
+      await assert.rejects(fs.access(path.join(temporary, 'uploads', id, 'stale.jpg')), { code: 'ENOENT' });
+      await assert.rejects(fs.access(path.join(temporary, 'jobs', id)), { code: 'ENOENT' });
+    } finally {
+      await worker.stop();
+      await fs.rm(temporary, { recursive: true, force: true });
+    }
+  });
+
+  it('retains the private source on graceful shutdown and finishes it after restart', async () => {
+    const temporary = await fs.mkdtemp('/tmp/simplylearn-shutdown-test-');
+    const data = await Teacher.create({ name: 'Graceful restart', classname: 'Retained source',
+      sourceType: 'pdf', status: 'queued' });
+    const id = data._id.toString();
+    const roots = { uploadRoot: path.join(temporary, 'uploads'), workRoot: path.join(temporary, 'jobs') };
+    let began;
+    const started = new Promise(resolve => { began = resolve; });
+    const worker = new ConversionQueue({ ...roots, convert: (source, kind, runtime, { signal }) =>
+      new Promise((resolve, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        began();
+      }) });
+    const restarted = new ConversionQueue(roots);
+    classrooms.push({ id, directory: path.join(roots.uploadRoot, id) });
+    try {
+      await fs.mkdir(path.join(roots.workRoot, id), { recursive: true });
+      const source = path.join(roots.workRoot, id, 'source.pdf');
+      await fs.writeFile(source, makePdf(2));
+      worker.enqueue(id);
+      await started;
+      await worker.stop();
+      assert.equal((await Teacher.findById(id)).status, 'queued');
+      await fs.access(source);
+      await restarted.resume();
+      await restarted.draining;
+      assert.equal((await Teacher.findById(id)).status, 'ready');
+      await fs.access(path.join(roots.uploadRoot, id, 'slide-002.jpg'));
+    } finally {
+      await worker.stop();
+      await restarted.stop();
+      await fs.rm(temporary, { recursive: true, force: true });
+    }
   });
 });

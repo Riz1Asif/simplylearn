@@ -40,7 +40,7 @@ body::-webkit-scrollbar-thumb {
 
 
 <div style="margin: 65px 200px;">
-  <form action="/teacher" method="post" enctype="multipart/form-data">
+  <form id="teacher-form" action="/teacher" method="post" enctype="multipart/form-data">
     <p>Teacher controls are available in the browser you use to create the classroom.</p>
     <label for="fname">First Name</label>
     <input type="text" id="fname" name="name" placeholder="Your name.." maxlength="100" required>
@@ -48,15 +48,19 @@ body::-webkit-scrollbar-thumb {
     <label for="cname">Class Name</label>
     <input type="text" id="cname" name="classname" placeholder="Your class name.." maxlength="200" required>
 
-    <label for="image">Image Upload</label>
+    <label for="myFile">Presentation or slide images</label>
     <br>
     
-    <input type="file" id="myFile" name="pptimages" accept="image/png,image/jpeg" multiple required> <i style="font-size: 1rem;">Up to 40 PNG/JPEG slides, at most 5 MiB each</i>
+    <input type="file" id="myFile" name="pptimages" accept=".pptx,.pdf,image/png,image/jpeg" multiple required>
+    <p style="font-size: 1rem;">Choose one PPTX/PDF up to 25 MiB, or up to 40 PNG/JPEG images of 5 MiB each. Presentations may contain up to 40 slides.</p>
+    <p style="font-size: 1rem;">Presentations become still images. Animations and video are not included. Hidden PPTX slides and speaker notes are excluded. For the closest match to PowerPoint, upload an exported PDF with embedded fonts.</p>
      
       
     <input type="submit" value="Submit">
+    <p id="upload-status" role="status" aria-live="polite" hidden></p>
   </form>
 </div>
 
+<script src="/assets/upload.js"></script>
 </body>
 </html>

@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Preparing your classroom</title>
+  <style>
+    body { font-family: sans-serif; background: #23232e; color: #eee; padding: 2rem; }
+    main { max-width: 38rem; margin: 4rem auto; line-height: 1.6; }
+    progress { width: 100%; }
+    a { color: #8ed8ff; }
+    button { margin-top: 1rem; padding: .7rem 1rem; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <main id="conversion-state" data-classroom-id="<%= data._id %>" data-status="<%= data.status %>">
+    <h1>Preparing your classroom</h1>
+    <p><%= data.classname %></p>
+    <p id="conversion-message" role="status" aria-live="polite"><%= data.status === 'failed' ? data.conversionError : 'Your presentation is being prepared. You can keep this page open.' %></p>
+    <progress id="conversion-progress" aria-label="Slide conversion" <%= data.status === 'failed' ? 'hidden' : '' %>></progress>
+    <p>The student link will appear when your slides are ready.</p>
+    <p><a href="/teacher">Upload another presentation</a></p>
+    <form action="/session/<%= data._id %>/teacher" method="post">
+      <button type="submit">Cancel and discard this classroom</button>
+    </form>
+  </main>
+  <script src="/assets/processing.js"></script>
+</body>
+</html>
